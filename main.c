@@ -3,9 +3,9 @@
 #include <signal.h>
 
 /* IPv4 Addresses and Interface Name */
-char* target_ip = (char*)"192.168.0.10";
-char* gateway_ip = (char*)"192.168.0.1";
-char* interface = (char*)"wlp3s0";
+char* target_ip = (char*)"????";
+char* gateway_ip = (char*)"????";
+char* interface = (char*)"????";
 
 /* Hardware Addresses */
 macaddr target_mac;
@@ -17,6 +17,26 @@ LOCAL_NET_DATA lnd;
 /* Sockets */
 int arp_socket;
 int sniffing_socket;
+
+void show_usage()
+{
+    printf("\n***Usage: fantom [interface] [target ip] [gateway ip]\n\n");
+}
+
+int parse_arguments(int argc, char** argv)
+{
+    if (argc != 4)
+    {
+        show_usage();
+        return 0;
+    }
+
+    interface     = argv[1];
+    target_ip     = argv[2];
+    gateway_ip    = argv[3];
+
+    return 1;
+}
 
 void* poison_target(void* param)
 {
@@ -82,8 +102,11 @@ uint8_t* EditPacket(uint8_t* pkt)
     return pkt;
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    if (parse_arguments(argc, argv) == 0)
+        return -1;
+
     arp_socket = create_arp_udp_socket();
     if (arp_socket == -1) return -1;
 
