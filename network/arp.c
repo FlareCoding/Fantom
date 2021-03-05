@@ -128,7 +128,10 @@ int send_arp_packet(int sock, int iface_index, struct arp_packet pkt)
     // sending the packet
     if (sendto(sock, &arp_packet, sizeof(arp_packet), 0, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
 		    printf("Error sending arp packet to %s\n", iptostr(pkt.dest_ip));
+            return -1;
     }
+
+    return 0;
 }
 
 void craft_arp_packet(struct arp_packet* pkt, ipaddr sender_ip, macaddr sender_mac, ipaddr dest_ip, macaddr dest_mac)
